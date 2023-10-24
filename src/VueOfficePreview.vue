@@ -37,7 +37,9 @@ export default {
   },
   mounted() {
     if (this.option.url) {
-      this.setEditor(this.option);
+      this.$nextTick(()=> {
+        this.setEditor(this.option);
+      })
     }
   },
   methods: {
