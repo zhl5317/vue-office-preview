@@ -1,9 +1,34 @@
 <!--onlyoffice 编辑器-->
 <template>
-  <div id="vabOnlyOffice"></div>
+  <div
+    class="vue-office-preview"
+    :class="{ 'vue-office-preview--mobile': editorType === 'mobile' }"
+    :style="previewStyle"
+  >
+    <div v-show="option.url && !errorMessage" ref="editorHost" class="vue-office-preview__editor">
+      <div :id="editorId"></div>
+    </div>
+    <div v-if="errorMessage" class="vue-office-preview__message" role="alert">
+      <svg class="vue-office-preview__message-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M28 7H13a3 3 0 0 0-3 3v28a3 3 0 0 0 3 3h22a3 3 0 0 0 3-3V17zM28 7v10h10M24 23v7M24 35h.01" />
+      </svg>
+      <h2>暂时无法打开文档</h2>
+      <p>{{ errorMessage }}</p>
+      <button type="button" @click="setEditor(option)">重新加载</button>
+    </div>
+    <div v-else-if="!option.url" class="vue-office-preview__message">
+      <svg class="vue-office-preview__message-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M28 7H13a3 3 0 0 0-3 3v28a3 3 0 0 0 3 3h22a3 3 0 0 0 3-3V17zM28 7v10h10M17 25h14M17 31h9" />
+      </svg>
+      <h2>等待打开文档</h2>
+      <p>请选择要预览的文档</p>
+    </div>
+  </div>
 </template>
 
 <script>
+let nextEditorId = 0;
+
 export default {
   name: "VueOfficePreview",
   props: {
@@ -18,41 +43,110 @@ export default {
     return {
       doctype: "",
       docEditor: null,
+      editorId: `vue-office-preview-${++nextEditorId}`,
+      isMobile: false,
+      errorMessage: "",
     };
   },
+  computed: {
+    editorType() {
+      if (["desktop", "mobile"].includes(this.option.type)) {
+        return this.option.type;
+      }
+      return this.isMobile ? "mobile" : "desktop";
+    },
+    previewStyle() {
+      return {
+        width: this.option.width || "100%",
+        height: this.option.height || null,
+      };
+    },
+  },
   beforeDestroy() {
-    if (this.docEditor !== null) {
-      this.docEditor.destroyEditor();
-      this.docEditor = null;
+    if (this.mobileQuery) {
+      if (this.mobileQuery.removeEventListener) {
+        this.mobileQuery.removeEventListener("change", this.updateDevice);
+      } else {
+        this.mobileQuery.removeListener(this.updateDevice);
+      }
     }
+    this.destroyEditor();
   },
   watch: {
     option: {
       handler: function (n) {
-        this.setEditor(n);
-        this.doctype = this.getFileType(n.fileType);
+        if (this.$refs.editorHost) this.setEditor(n);
       },
       deep: true,
     },
   },
   mounted() {
-    if (this.option.url) {
-      this.$nextTick(()=> {
-        this.setEditor(this.option);
-      })
+    // Coarse pointers keep phones/tablets in mobile mode in landscape too.
+    this.mobileQuery = window.matchMedia("(max-width: 767px), (hover: none) and (pointer: coarse)");
+    this.isMobile = this.mobileQuery.matches;
+    if (this.mobileQuery.addEventListener) {
+      this.mobileQuery.addEventListener("change", this.updateDevice);
+    } else {
+      this.mobileQuery.addListener(this.updateDevice);
     }
+    this.setEditor(this.option);
   },
   methods: {
-    async setEditor(option) {
+    updateDevice() {
+      const previousType = this.editorType;
+      this.isMobile = this.mobileQuery.matches;
+      if (previousType !== this.editorType) this.setEditor(this.option);
+    },
+    destroyEditor() {
+      if (this.restoreToolbar) {
+        this.restoreToolbar();
+        this.restoreToolbar = null;
+      }
       if (this.docEditor !== null) {
         this.docEditor.destroyEditor();
         this.docEditor = null;
       }
-      this.doctype = this.getFileType(option.fileType);
+    },
+    pinMobileToolbar() {
+      if (!this.option.pinToolbar || this.editorType !== "mobile" || this.restoreToolbar) return;
+      try {
+        const frame = this.$refs.editorHost.querySelector("iframe");
+        const common = frame.contentWindow.Common;
+        const api = common && common.EditorApi && common.EditorApi.get();
+        if (!api || typeof api.asc_registerCallback !== "function") {
+          throw new Error("当前文档服务不支持固定移动端工具栏。");
+        }
+        const register = api.asc_registerCallback;
+        // ONLYOFFICE 7.3 registers this auto-hide callback after onAppReady; keep other SDK events intact.
+        api.asc_registerCallback = function (name, callback) {
+          if (name !== "onMobileScrollDelta") return register.call(this, name, callback);
+        };
+        this.restoreToolbar = () => { api.asc_registerCallback = register; };
+      } catch (error) {
+        // A cross-origin document service must be proxied before its toolbar can be pinned.
+        this.$emit("warning", error);
+      }
+    },
+    setEditor(option) {
+      this.destroyEditor();
+      this.errorMessage = "";
+      if (!option.url) return;
+      const fileType = (option.fileType || "").toLowerCase();
+      this.doctype = this.getFileType(fileType);
+      if (!this.doctype) {
+        this.showError(new Error("不支持的文件类型，请检查 fileType 配置。"));
+        return;
+      }
+      if (!window.DocsAPI || !window.DocsAPI.DocEditor) {
+        this.showError(new Error("文档服务未加载，请检查 ONLYOFFICE 服务地址和网络连接。"));
+        return;
+      }
       let config = {
+        type: this.editorType,
+        title: option.title || "文档预览",
         document: {
           //后缀
-          fileType: option.fileType,
+          fileType,
           title: option.title || "",
           key: option.key,
           permissions: {
@@ -81,15 +175,28 @@ export default {
             id:  1,
             name: "qcc",
           },
-          mode: option.model ? option.model : "edit",
+          mode: option.model || (option.isEdit ? "edit" : "view"),
         },
-        width: option.width || "100%",
-        height: option.height || "700px",
-        token: "h1pMxUQvWlkyKNKyZcdZh5SAm1Sc9mwJ",
+        width: "100%",
+        height: "100%",
+        token: option.token,
+        events: {
+          onAppReady: () => this.pinMobileToolbar(),
+          onDocumentReady: () => this.$emit("ready"),
+          onError: (event) => this.showError(event),
+        },
       };
 
-      // eslint-disable-next-line no-undef,no-unused-vars
-      this.docEditor = new DocsAPI.DocEditor("vabOnlyOffice", config);
+      try {
+        this.$emit("loading");
+        this.docEditor = new window.DocsAPI.DocEditor(this.editorId, config);
+      } catch (error) {
+        this.showError(error);
+      }
+    },
+    showError(error) {
+      this.errorMessage = (error.data && error.data.errorDescription) || error.message || "文档加载失败，请稍后重试。";
+      this.$emit("error", error);
     },
     getFileType(fileType) {
       let docType = "";
@@ -155,4 +262,94 @@ export default {
 </script>
 
 <style>
+.vue-office-preview {
+  position: relative;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  height: 700px;
+  overflow: hidden;
+  background: #f5f7f6;
+}
+
+.vue-office-preview--mobile {
+  height: 100vh;
+  height: 100dvh;
+}
+
+.vue-office-preview__editor {
+  width: 100%;
+  height: 100%;
+}
+
+.vue-office-preview__editor > iframe {
+  /* ONLYOFFICE sets mobile frames to fixed; keep embedded previews in their container. */
+  position: static !important;
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.vue-office-preview__message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  justify-content: safe center;
+  box-sizing: border-box;
+  height: 100%;
+  padding: 24px;
+  color: #63756f;
+  font: 14px/1.7 'Avenir Next', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  text-align: center;
+  overflow-wrap: anywhere;
+  overflow: auto;
+}
+
+.vue-office-preview__message-icon {
+  flex: none;
+  box-sizing: content-box;
+  width: 42px;
+  height: 42px;
+  padding: 16px;
+  margin-bottom: 20px;
+  border: 1px solid #dce5e0;
+  border-radius: 22px;
+  background: #fff;
+  color: #226b58;
+}
+
+.vue-office-preview__message h2 {
+  margin: 0;
+  color: #203c36;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.vue-office-preview__message p {
+  max-width: 320px;
+  margin: 8px 0 24px;
+}
+
+.vue-office-preview__message button {
+  flex: none;
+  min-height: 44px;
+  padding: 10px 28px;
+  border: 0;
+  border-radius: 12px;
+  background: #226b58;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.vue-office-preview__message button:active {
+  background: #194f42;
+}
+
+.vue-office-preview__message button:focus-visible {
+  outline: 2px solid #226b58;
+  outline-offset: 3px;
+}
 </style>
