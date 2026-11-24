@@ -17,6 +17,8 @@
   "homepage": "",
   "license": "MIT",
   "scripts": {
+    "test": "node tests/preview.test.js",
+    "test:mobile": "node tests/mobile-toolbar.e2e.js",
     "dev": "webpack-dev-server --open --config webpack.config.js --port=3001",
     "example": "rm -rf ./example/dist/*.js && rm -rf ./example/dist/*.html && webpack --progress --config webpack.config.js",
     "build": "webpack --progress --config webpack.build.js"
